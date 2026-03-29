@@ -1,0 +1,75 @@
+services:
+    # ── Redis — session store + rate limiter ────────────────────────────────────
+    redis:
+        image: redis:7-alpine
+        restart: unless-stopped
+        ports:
+            - "6379:6379"
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 5s
+            timeout: 3s
+            retries: 5
+
+    # ── NATS — conversation history stream ──────────────────────────────────────
+    nats:
+        image: nats:2.10-alpine
+        restart: unless-stopped
+        command: ["-js", "-m", "8222"]
+        ports:
+            - "4222:4222" # client
+            - "8222:8222" # HTTP monitoring  →  http://localhost:8222
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "--quiet",
+                    "--tries=1",
+                    "--spider",
+                    "http://localhost:8222/healthz",
+                ]
+            interval: 5s
+            timeout: 3s
+            retries: 5
+
+    # # ── Shell proxy ─────────────────────────────────────────────────────────────
+    # shell:
+    #     # build: .
+    #     image: shell:dev
+    #     restart: unless-stopped
+    #     ports:
+    #         - "${SHELL_SERVER_PORT:-8080}:${SHELL_SERVER_PORT:-8080}"
+    #     environment:
+    #         SHELL_SERVER_HOST: "${SHELL_SERVER_HOST:-0.0.0.0}"
+    #         SHELL_SERVER_PORT: "${SHELL_SERVER_PORT:-8080}"
+    #         SHELL_OPENCLAW_GATEWAY_URL: "${SHELL_OPENCLAW_GATEWAY_URL:-http://host.docker.internal:18789}"
+    #         SHELL_OPENCLAW_GATEWAY_TOKEN: e5a5e7c9438baec1e1e449bc737f161c7e3ec104cef5a747
+    #         SHELL_REDIS_URL: "redis://redis:6379"
+    #         SHELL_NATS_URL: "nats://nats:4222"
+    #         SHELL_NATS_STREAM: "${SHELL_NATS_STREAM:-conversations}"
+    #         SHELL_NATS_SUBJECT_PREFIX: "${SHELL_NATS_SUBJECT_PREFIX:-conversation}"
+    #         SHELL_RATE_LIMIT_RPS: "${SHELL_RATE_LIMIT_RPS:-60}"
+    #         SHELL_SESSION_TTL_SECS: "${SHELL_SESSION_TTL_SECS:-3600}"
+    #         SHELL_REQUEST_TIMEOUT_MS: "${SHELL_REQUEST_TIMEOUT_MS:-30000}"
+    #         SHELL_LOG_LEVEL: "${SHELL_LOG_LEVEL:-info}"
+    #         SHELL_SWAGGER_ENABLED: "${SHELL_SWAGGER_ENABLED:-true}"
+    #     depends_on:
+    #         redis:
+    #             condition: service_healthy
+    #         nats:
+    #             condition: service_healthy
+    #     healthcheck:
+    #         test:
+    #             [
+    #                 "CMD",
+    #                 "wget",
+    #                 "--quiet",
+    #                 "--tries=1",
+    #                 "--spider",
+    #                 "http://localhost:${SHELL_SERVER_PORT:-8080}/health",
+    #             ]
+    #         interval: 10s
+    #         timeout: 5s
+    #         retries: 5
+    #         start_period: 5s

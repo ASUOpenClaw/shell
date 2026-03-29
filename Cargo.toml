@@ -1,0 +1,30 @@
+[package]
+name = "shell"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+strip = true          # remove debug symbols — significant size reduction
+lto = "thin"          # thin LTO: good optimization/build-time balance
+codegen-units = 1     # single codegen unit for better cross-crate optimization
+opt-level = 3         # max performance (proxy latency matters more than binary size)
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+deadpool-redis = "0.18"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "timeout"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+config = "0.14"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+async-nats = "0.39"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }

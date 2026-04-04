@@ -26,5 +26,6 @@ uuid = { version = "1", features = ["v4"] }
 async-nats = "0.39"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+jsonwebtoken = "9"
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }

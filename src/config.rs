@@ -16,11 +16,11 @@ pub struct Config {
     /// Optional workspace→agent overrides: "ws1:agentA,ws2:agentB"
     #[serde(default)]
     pub openclaw_agent_map: String,
+    /// Shared HS256 secret — must match SECRET_KEY in the REST API.
+    pub jwt_secret: String,
     pub redis_url: String,
     #[serde(default = "default_pool_size")]
     pub redis_pool_size: usize,
-    #[serde(default = "default_session_ttl")]
-    pub session_ttl_secs: u64,
     #[serde(default = "default_rate_limit")]
     pub rate_limit_rps: u32,
     #[serde(default = "default_timeout")]
@@ -48,9 +48,6 @@ fn default_port() -> u16 {
 }
 fn default_pool_size() -> usize {
     10
-}
-fn default_session_ttl() -> u64 {
-    3600
 }
 fn default_rate_limit() -> u32 {
     60

@@ -5,8 +5,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use chrono::Utc;
-use deadpool_redis::redis::AsyncCommands;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::Deserialize;
 use tracing::warn;
 
@@ -14,12 +13,22 @@ use crate::{error::AppError, state::AppState};
 
 /// Session data injected into request extensions after successful auth.
 /// Downstream handlers and middleware extract this via `Extension<SessionData>`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct SessionData {
     pub workspace_id: String,
     pub user_id: String,
-    /// Unix timestamp (seconds). Validated against current time.
-    pub expires_at: u64,
+}
+
+/// JWT claims produced by the REST API (python-jose, HS256).
+/// Only the fields we care about are decoded; extras are ignored.
+#[derive(Deserialize)]
+struct Claims {
+    /// user UUID as string
+    sub: String,
+    /// token type: must be "access"
+    #[serde(rename = "type")]
+    token_type: String,
+    // exp is validated automatically by jsonwebtoken
 }
 
 pub async fn auth_middleware(
@@ -30,15 +39,20 @@ pub async fn auth_middleware(
     let token = extract_bearer(req.headers())
         .ok_or_else(|| AppError::Unauthorized("missing Authorization header".to_string()))?;
 
-    let session = lookup_session(&state, token).await?;
+    let workspace_id = req
+        .headers()
+        .get("x-workspace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned())
+        .ok_or_else(|| AppError::Unauthorized("missing X-Workspace-Id header".to_string()))?;
 
-    let now = Utc::now().timestamp() as u64;
-    if session.expires_at < now {
-        warn!(workspace_id = %session.workspace_id, "session expired");
-        return Err(AppError::Unauthorized("session expired".to_string()));
-    }
+    let user_id = validate_jwt(token, &state.config.jwt_secret)?;
 
-    req.extensions_mut().insert(session);
+    req.extensions_mut().insert(SessionData {
+        workspace_id,
+        user_id,
+    });
+
     Ok(next.run(req).await)
 }
 
@@ -49,15 +63,24 @@ fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
-async fn lookup_session(state: &AppState, token: &str) -> Result<SessionData, AppError> {
-    let key = format!("session:{token}");
+fn validate_jwt(token: &str, secret: &str) -> Result<String, AppError> {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = true;
 
-    let mut conn = state.redis_pool.get().await.map_err(AppError::RedisPool)?;
+    let data = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|e| {
+        warn!("JWT validation failed: {e}");
+        AppError::Unauthorized("invalid or expired token".to_string())
+    })?;
 
-    let raw: Option<String> = conn.get(&key).await.map_err(AppError::RedisCmd)?;
+    if data.claims.token_type != "access" {
+        warn!("non-access token type: {}", data.claims.token_type);
+        return Err(AppError::Unauthorized("wrong token type".to_string()));
+    }
 
-    let raw = raw.ok_or_else(|| AppError::Unauthorized("invalid or expired token".to_string()))?;
-
-    serde_json::from_str::<SessionData>(&raw)
-        .map_err(|e| AppError::Internal(format!("malformed session in redis: {e}")))
+    Ok(data.claims.sub)
 }

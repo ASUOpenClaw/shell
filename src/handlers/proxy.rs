@@ -8,10 +8,12 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
     response::Response,
 };
+use deadpool_redis::redis::AsyncCommands;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::{
     error::AppError,
@@ -81,9 +83,23 @@ pub async fn proxy_handler(
     // -----------------------------------------------------------------------
     // 4. Buffer request body (capped at 10 MB) for NATS publish + forwarding.
     // -----------------------------------------------------------------------
-    let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
+    let raw_body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
         .await
         .map_err(|e| AppError::Internal(format!("failed to read request body: {e}")))?;
+
+    // -----------------------------------------------------------------------
+    // 4b. Inject MCP workspace context into the messages array.
+    //     Mint a short-lived token, store {workspace_id, user_id} in Redis,
+    //     and prepend (or append to existing) a system message so the model
+    //     can pass it as ctx_token in every MCP tool call.
+    // -----------------------------------------------------------------------
+    let body_bytes = inject_mcp_context(
+        &state,
+        &session.workspace_id,
+        &session.user_id,
+        raw_body_bytes,
+    )
+    .await;
 
     // Publish request to NATS — fire-and-forget.
     state.nats_publisher.publish(ConversationMessage::new(
@@ -144,6 +160,87 @@ pub async fn proxy_handler(
             error!(error = %e, "failed to build response");
             AppError::Internal(e.to_string())
         })
+}
+
+// ---------------------------------------------------------------------------
+// MCP context injection
+// ---------------------------------------------------------------------------
+
+/// Mint an MCP context token, write it to Redis, and inject a system message
+/// into the `messages` array so the model knows to pass it in every tool call.
+/// Returns the (possibly modified) body bytes. On any error, returns the
+/// original bytes unchanged so the request is never dropped.
+async fn inject_mcp_context(
+    state: &AppState,
+    workspace_id: &str,
+    user_id: &str,
+    body: Bytes,
+) -> Bytes {
+    // Only modify JSON bodies that have a "messages" field.
+    let mut parsed: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return body,
+    };
+
+    let messages = match parsed.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        Some(arr) => arr,
+        None => return body,
+    };
+
+    // Mint token and build Redis payload.
+    let token = Uuid::new_v4().to_string();
+    let ctx_json = json!({
+        "workspace_id": workspace_id,
+        "user_id": user_id,
+    })
+    .to_string();
+
+    // Write to Redis (best-effort; failure does not abort the request).
+    let redis_key = format!("mcp_ctx:{token}");
+    match state.redis_pool.get().await {
+        Ok(mut conn) => {
+            let result: Result<(), _> = conn.set_ex(&redis_key, &ctx_json, 300_u64).await;
+            if let Err(e) = result {
+                warn!(token, "failed to write MCP context to Redis: {e}");
+                return body; // skip injection if Redis write failed
+            }
+        }
+        Err(e) => {
+            warn!("failed to get Redis connection for MCP context: {e}");
+            return body;
+        }
+    }
+
+    // Build the system message content.
+    let ctx_msg = format!(
+        "[WORKSPACE_CTX: mcp_ctx={token}] Always pass this exact token as ctx_token in every tool call. Never modify it."
+    );
+
+    // If the first message is a system message, append to its content.
+    // Otherwise prepend a new system message.
+    if messages
+        .first()
+        .and_then(|m| m.get("role"))
+        .and_then(|r| r.as_str())
+        == Some("system")
+    {
+        if let Some(content) = messages[0]
+            .get_mut("content")
+            .and_then(|c| c.as_str().map(|s| s.to_owned()))
+        {
+            messages[0]["content"] = Value::String(format!("{content}\n{ctx_msg}"));
+        }
+    } else {
+        messages.insert(0, json!({"role": "system", "content": ctx_msg}));
+    }
+
+    match serde_json::to_vec(&parsed) {
+        Ok(modified) => Bytes::from(modified),
+        Err(e) => {
+            error!("failed to re-serialize request body: {e}");
+            body
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

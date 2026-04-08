@@ -25,7 +25,7 @@ async fn main() {
     info!(
         host = %cfg.server_host,
         port = cfg.server_port,
-        gateway = %cfg.openclaw_gateway_url,
+        gateway = %cfg.goclaw_gateway_url,
         "shell proxy starting"
     );
 

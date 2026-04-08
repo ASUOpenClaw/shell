@@ -63,7 +63,7 @@ async fn ping_redis(state: &AppState) -> Result<(), AppError> {
 
 // ---------------------------------------------------------------------------
 // GET /admin/agents
-// Returns the configured workspace→agent_id mapping from the resolver.
+// Returns info about the GoClaw credential resolution strategy.
 // ---------------------------------------------------------------------------
 
 #[utoipa::path(
@@ -71,12 +71,13 @@ async fn ping_redis(state: &AppState) -> Result<(), AppError> {
     path = "/admin/agents",
     tag = "admin",
     responses(
-        (status = 200, description = "Configured workspace→agent mappings")
+        (status = 200, description = "GoClaw credential info")
     )
 )]
 pub async fn list_agents_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
-        "default_agent": state.agent_resolver.default_agent(),
-        "workspace_overrides": state.agent_resolver.entries(),
+        "mode": "goclaw_dynamic",
+        "goclaw_gateway_url": state.config.goclaw_gateway_url,
+        "credential_source": "Redis ws_creds:{workspace_id}",
     }))
 }

@@ -18,8 +18,6 @@ pub enum AppError {
     RedisPool(#[from] deadpool_redis::PoolError),
     #[error("redis cmd error: {0}")]
     RedisCmd(#[from] deadpool_redis::redis::RedisError),
-    #[error("nats error: {0}")]
-    NatsError(String),
     #[error("internal error: {0}")]
     Internal(String),
 }

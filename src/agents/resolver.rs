@@ -1,53 +1,33 @@
-use std::collections::HashMap;
+use deadpool_redis::redis::AsyncCommands;
+use serde::Deserialize;
 
-/// Maps workspace IDs to pre-configured OpenClaw agent IDs.
+use crate::error::AppError;
+
+/// Per-workspace GoClaw credentials cached in Redis by the REST API.
 ///
-/// Agents are defined in the OpenClaw gateway's config (`agents.list[].id`).
-/// This resolver does NOT spawn or terminate agents — it only performs a
-/// config-based lookup: workspace_id → agent_id.
-///
-/// If no explicit mapping exists for a workspace, the default agent is used.
-pub struct AgentResolver {
-    map: HashMap<String, String>,
-    default_agent: String,
+/// Redis key: `ws_creds:{workspace_id}`
+/// Value: `{"api_key":"goclaw_sk_...","agent_id":"biologist"}`
+/// TTL: 3600 s (refreshed by REST API on workspace create/update)
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceCreds {
+    pub api_key: String,
+    pub agent_id: String,
 }
 
-impl AgentResolver {
-    /// Build from a comma-separated mapping string ("ws1:agentA,ws2:agentB")
-    /// and a fallback default agent ID.
-    pub fn from_config(map_str: &str, default_agent: String) -> Self {
-        let map = parse_agent_map(map_str);
-        Self { map, default_agent }
-    }
-
-    /// Returns the agent_id for a workspace.
-    /// Falls back to the default agent if no explicit mapping exists.
-    pub fn resolve(&self, workspace_id: &str) -> &str {
-        self.map
-            .get(workspace_id)
-            .map(String::as_str)
-            .unwrap_or(&self.default_agent)
-    }
-
-    pub fn entries(&self) -> &HashMap<String, String> {
-        &self.map
-    }
-
-    pub fn default_agent(&self) -> &str {
-        &self.default_agent
-    }
-}
-
-fn parse_agent_map(s: &str) -> HashMap<String, String> {
-    s.split(',')
-        .filter_map(|pair| {
-            let mut parts = pair.trim().splitn(2, ':');
-            let ws = parts.next()?.trim();
-            let agent = parts.next()?.trim();
-            if ws.is_empty() || agent.is_empty() {
-                return None;
-            }
-            Some((ws.to_string(), agent.to_string()))
-        })
-        .collect()
+/// Load workspace credentials from Redis.
+/// Returns `AppError::Unauthorized` if the key is missing (workspace not provisioned).
+pub async fn load_workspace_creds(
+    pool: &deadpool_redis::Pool,
+    workspace_id: &str,
+) -> Result<WorkspaceCreds, AppError> {
+    let key = format!("ws_creds:{workspace_id}");
+    let mut conn = pool.get().await.map_err(AppError::RedisPool)?;
+    let raw: Option<String> = conn.get(&key).await.map_err(AppError::RedisCmd)?;
+    let raw = raw.ok_or_else(|| {
+        AppError::Unauthorized(format!(
+            "no GoClaw credentials cached for workspace {workspace_id}"
+        ))
+    })?;
+    serde_json::from_str(&raw)
+        .map_err(|e| AppError::Internal(format!("invalid ws_creds JSON: {e}")))
 }

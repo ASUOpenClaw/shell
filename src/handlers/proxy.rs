@@ -16,6 +16,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
+    agents::resolver::load_workspace_creds,
     error::AppError,
     middleware::auth::SessionData,
     nats::publisher::{ConversationMessage, MessageDirection, NatsPublisher},
@@ -26,9 +27,9 @@ use crate::{
     post,
     path = "/v1/{path}",
     tag = "proxy",
-    params(("path" = String, Path, description = "Path forwarded to the OpenClaw gateway")),
+    params(("path" = String, Path, description = "Path forwarded to the GoClaw gateway")),
     responses(
-        (status = 200, description = "Streamed response from OpenClaw gateway"),
+        (status = 200, description = "Streamed response from GoClaw gateway"),
         (status = 401, description = "Unauthorized"),
         (status = 429, description = "Rate limit exceeded"),
         (status = 502, description = "Gateway error"),
@@ -40,16 +41,13 @@ pub async fn proxy_handler(
     req: Request<Body>,
 ) -> Result<Response, AppError> {
     // -----------------------------------------------------------------------
-    // 1. Resolve agent_id from workspace — pure config lookup, no HTTP calls.
+    // 1. Load per-workspace GoClaw credentials from Redis.
     // -----------------------------------------------------------------------
-    let agent_id = state
-        .agent_resolver
-        .resolve(&session.workspace_id)
-        .to_string();
+    let creds = load_workspace_creds(&state.redis_pool, &session.workspace_id).await?;
 
     info!(
         workspace_id = %session.workspace_id,
-        agent_id = %agent_id,
+        agent_id = %creds.agent_id,
         "routing request"
     );
 
@@ -61,7 +59,7 @@ pub async fn proxy_handler(
     // -----------------------------------------------------------------------
     let original_path = req.uri().path();
     // original_path here is the tail after /v1 (e.g. "/chat/completions")
-    let upstream_url = format!("{}/v1{}", state.config.openclaw_gateway_url, original_path);
+    let upstream_url = format!("{}/v1{}", state.config.goclaw_gateway_url, original_path);
     let upstream_url = match req.uri().query() {
         Some(q) => format!("{upstream_url}?{q}"),
         None => upstream_url,
@@ -75,9 +73,9 @@ pub async fn proxy_handler(
 
     let fwd_headers = build_upstream_headers(
         req.headers(),
-        &state.config.openclaw_gateway_token,
-        &session.workspace_id,
-        &agent_id,
+        &creds.api_key,
+        &session.user_id,
+        &creds.agent_id,
     );
 
     // -----------------------------------------------------------------------
@@ -249,12 +247,12 @@ async fn inject_mcp_context(
 
 /// Build upstream headers from the inbound request:
 /// - Drop hop-by-hop headers
-/// - Replace Authorization with the gateway's own token
-/// - Add OpenClaw session key (workspace isolation) and agent-id (routing)
+/// - Replace Authorization with the workspace-bound GoClaw API key
+/// - Add X-GoClaw-User-Id (per-user session isolation) and X-GoClaw-Agent-Id (agent routing)
 fn build_upstream_headers(
     inbound: &HeaderMap,
-    gateway_token: &str,
-    workspace_id: &str,
+    api_key: &str,
+    user_id: &str,
     agent_id: &str,
 ) -> reqwest::header::HeaderMap {
     use axum::http::header;
@@ -281,25 +279,25 @@ fn build_upstream_headers(
         }
     }
 
-    // Inject gateway auth token.
+    // Inject workspace-bound GoClaw API key (tenant resolved automatically from key).
     if let Ok(auth_value) =
-        reqwest::header::HeaderValue::from_str(&format!("Bearer {gateway_token}"))
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}"))
     {
         out.insert(reqwest::header::AUTHORIZATION, auth_value);
     }
 
-    // Inject session key for conversation continuity per workspace.
-    if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("workspace_{workspace_id}")) {
+    // Inject user-id for per-user session isolation within the tenant.
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(user_id) {
         out.insert(
-            reqwest::header::HeaderName::from_static("x-openclaw-session-key"),
+            reqwest::header::HeaderName::from_static("x-goclaw-user-id"),
             v,
         );
     }
 
-    // Inject agent-id to route to the correct pre-configured agent.
+    // Inject agent-id to route to the workspace's pre-configured agent.
     if let Ok(v) = reqwest::header::HeaderValue::from_str(agent_id) {
         out.insert(
-            reqwest::header::HeaderName::from_static("x-openclaw-agent-id"),
+            reqwest::header::HeaderName::from_static("x-goclaw-agent-id"),
             v,
         );
     }

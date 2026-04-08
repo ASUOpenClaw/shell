@@ -19,7 +19,7 @@ pub struct SessionData {
     pub user_id: String,
 }
 
-/// JWT claims produced by the REST API (python-jose, HS256).
+/// JWT claims produced by the REST API (python-jose, RS256).
 /// Only the fields we care about are decoded; extras are ignored.
 #[derive(Deserialize)]
 struct Claims {
@@ -46,7 +46,7 @@ pub async fn auth_middleware(
         .map(|s| s.to_owned())
         .ok_or_else(|| AppError::Unauthorized("missing X-Workspace-Id header".to_string()))?;
 
-    let user_id = validate_jwt(token, &state.config.jwt_secret)?;
+    let user_id = validate_jwt(token, &state.config.jwt_public_key)?;
 
     req.extensions_mut().insert(SessionData {
         workspace_id,
@@ -63,16 +63,16 @@ fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
-fn validate_jwt(token: &str, secret: &str) -> Result<String, AppError> {
-    let mut validation = Validation::new(Algorithm::HS256);
+fn validate_jwt(token: &str, public_key_pem: &str) -> Result<String, AppError> {
+    let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes()).map_err(|e| {
+        warn!("failed to parse JWT public key: {e}");
+        AppError::Internal("invalid JWT public key configuration".to_string())
+    })?;
+
+    let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = true;
 
-    let data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .map_err(|e| {
+    let data = decode::<Claims>(token, &decoding_key, &validation).map_err(|e| {
         warn!("JWT validation failed: {e}");
         AppError::Unauthorized("invalid or expired token".to_string())
     })?;

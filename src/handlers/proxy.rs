@@ -45,9 +45,19 @@ pub async fn proxy_handler(
     // -----------------------------------------------------------------------
     let creds = load_workspace_creds(&state.redis_pool, &session.workspace_id).await?;
 
+    // Extract or generate a request correlation ID for distributed tracing.
+    // Forwarded downstream so GoClaw and MCP logs can be correlated.
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
     info!(
         workspace_id = %session.workspace_id,
         agent_id = %creds.agent_id,
+        request_id = %request_id,
         "routing request"
     );
 
@@ -76,6 +86,7 @@ pub async fn proxy_handler(
         &creds.api_key,
         &session.user_id,
         &creds.agent_id,
+        &request_id,
     );
 
     // -----------------------------------------------------------------------
@@ -166,9 +177,14 @@ pub async fn proxy_handler(
 // MCP context injection
 // ---------------------------------------------------------------------------
 
-/// Mint an MCP context token, write it to Redis, and inject a system message
-/// into the `messages` array so the model knows to pass it in every tool call.
-/// Returns the modified body bytes, or the original if the body has no `messages`.
+/// Get or create a stable MCP context token for this (workspace, user) session,
+/// write/refresh it in Redis, and inject a system message into the `messages`
+/// array so the model knows to pass it in every tool call.
+///
+/// Token is stable per session: reused across requests, TTL reset on each one.
+/// This prevents mid-conversation expiry — the token stays valid as long as
+/// the user keeps chatting (each request resets the 300s clock).
+///
 /// Redis errors propagate as AppError — fail fast rather than silently forward
 /// a request where every MCP tool call would fail with "invalid token".
 async fn inject_mcp_context(
@@ -188,21 +204,25 @@ async fn inject_mcp_context(
         None => return Ok(body),
     };
 
-    // Mint token and build Redis payload.
-    let token = Uuid::new_v4().to_string();
+    let mut conn = state.redis_pool.get().await.map_err(AppError::RedisPool)?;
+
+    // Reuse existing session token if present; mint new one otherwise.
+    // Either way, reset the TTL so the token stays alive while the user is active.
+    let session_key = format!("mcp_session:{workspace_id}:{user_id}");
+    let token: String = match conn.get::<_, Option<String>>(&session_key).await.map_err(AppError::RedisCmd)? {
+        Some(t) => t,
+        None => Uuid::new_v4().to_string(),
+    };
+
     let ctx_json = json!({
         "workspace_id": workspace_id,
         "user_id": user_id,
     })
     .to_string();
 
-    // Write to Redis — failure returns 503 so the caller gets a clear signal
-    // rather than an opaque MCP "invalid token" error mid-conversation.
-    let redis_key = format!("mcp_ctx:{token}");
-    let mut conn = state.redis_pool.get().await.map_err(AppError::RedisPool)?;
-    let _: () = conn.set_ex(&redis_key, &ctx_json, 300_u64)
-        .await
-        .map_err(AppError::RedisCmd)?;
+    // Refresh both the session pointer and the ctx payload.
+    let _: () = conn.set_ex(&session_key, &token, 300_u64).await.map_err(AppError::RedisCmd)?;
+    let _: () = conn.set_ex(format!("mcp_ctx:{token}"), &ctx_json, 300_u64).await.map_err(AppError::RedisCmd)?;
 
     // Build the system message content.
     let ctx_msg = format!(
@@ -249,6 +269,7 @@ fn build_upstream_headers(
     api_key: &str,
     user_id: &str,
     agent_id: &str,
+    request_id: &str,
 ) -> reqwest::header::HeaderMap {
     use axum::http::header;
 
@@ -293,6 +314,14 @@ fn build_upstream_headers(
     if let Ok(v) = reqwest::header::HeaderValue::from_str(agent_id) {
         out.insert(
             reqwest::header::HeaderName::from_static("x-goclaw-agent-id"),
+            v,
+        );
+    }
+
+    // Propagate (or set) request correlation ID for distributed tracing.
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(request_id) {
+        out.insert(
+            reqwest::header::HeaderName::from_static("x-request-id"),
             v,
         );
     }

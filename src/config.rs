@@ -9,8 +9,10 @@ pub struct Config {
     /// GoClaw gateway base URL (e.g. http://machine1:18790).
     /// Per-workspace API keys are loaded dynamically from Redis (ws_creds:{workspace_id}).
     pub goclaw_gateway_url: String,
-    /// Shared HS256 secret — must match SECRET_KEY in the REST API.
-    pub jwt_secret: String,
+    /// RSA public key PEM — must match the key pair used by the REST API.
+    /// Shell only verifies tokens (never signs), so it needs the public key only.
+    /// Env var: SHELL_JWT_PUBLIC_KEY (PEM content with literal newlines).
+    pub jwt_public_key: String,
     pub redis_url: String,
     #[serde(default = "default_pool_size")]
     pub redis_pool_size: usize,

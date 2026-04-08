@@ -12,7 +12,7 @@ use deadpool_redis::redis::AsyncCommands;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::{
@@ -90,6 +90,8 @@ pub async fn proxy_handler(
     //     Mint a short-lived token, store {workspace_id, user_id} in Redis,
     //     and prepend (or append to existing) a system message so the model
     //     can pass it as ctx_token in every MCP tool call.
+    //     Redis failure → 503: better to fail fast than silently forward
+    //     a request where MCP tool calls will all fail with "invalid token".
     // -----------------------------------------------------------------------
     let body_bytes = inject_mcp_context(
         &state,
@@ -97,7 +99,7 @@ pub async fn proxy_handler(
         &session.user_id,
         raw_body_bytes,
     )
-    .await;
+    .await?;
 
     // Publish request to NATS — fire-and-forget.
     state.nats_publisher.publish(ConversationMessage::new(
@@ -166,23 +168,24 @@ pub async fn proxy_handler(
 
 /// Mint an MCP context token, write it to Redis, and inject a system message
 /// into the `messages` array so the model knows to pass it in every tool call.
-/// Returns the (possibly modified) body bytes. On any error, returns the
-/// original bytes unchanged so the request is never dropped.
+/// Returns the modified body bytes, or the original if the body has no `messages`.
+/// Redis errors propagate as AppError — fail fast rather than silently forward
+/// a request where every MCP tool call would fail with "invalid token".
 async fn inject_mcp_context(
     state: &AppState,
     workspace_id: &str,
     user_id: &str,
     body: Bytes,
-) -> Bytes {
+) -> Result<Bytes, AppError> {
     // Only modify JSON bodies that have a "messages" field.
     let mut parsed: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(_) => return body,
+        Err(_) => return Ok(body),
     };
 
     let messages = match parsed.get_mut("messages").and_then(|m| m.as_array_mut()) {
         Some(arr) => arr,
-        None => return body,
+        None => return Ok(body),
     };
 
     // Mint token and build Redis payload.
@@ -193,21 +196,13 @@ async fn inject_mcp_context(
     })
     .to_string();
 
-    // Write to Redis (best-effort; failure does not abort the request).
+    // Write to Redis — failure returns 503 so the caller gets a clear signal
+    // rather than an opaque MCP "invalid token" error mid-conversation.
     let redis_key = format!("mcp_ctx:{token}");
-    match state.redis_pool.get().await {
-        Ok(mut conn) => {
-            let result: Result<(), _> = conn.set_ex(&redis_key, &ctx_json, 300_u64).await;
-            if let Err(e) = result {
-                warn!(token, "failed to write MCP context to Redis: {e}");
-                return body; // skip injection if Redis write failed
-            }
-        }
-        Err(e) => {
-            warn!("failed to get Redis connection for MCP context: {e}");
-            return body;
-        }
-    }
+    let mut conn = state.redis_pool.get().await.map_err(AppError::RedisPool)?;
+    let _: () = conn.set_ex(&redis_key, &ctx_json, 300_u64)
+        .await
+        .map_err(AppError::RedisCmd)?;
 
     // Build the system message content.
     let ctx_msg = format!(
@@ -233,10 +228,10 @@ async fn inject_mcp_context(
     }
 
     match serde_json::to_vec(&parsed) {
-        Ok(modified) => Bytes::from(modified),
+        Ok(modified) => Ok(Bytes::from(modified)),
         Err(e) => {
             error!("failed to re-serialize request body: {e}");
-            body
+            Ok(body)
         }
     }
 }

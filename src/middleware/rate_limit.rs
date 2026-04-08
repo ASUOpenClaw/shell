@@ -22,16 +22,17 @@ pub async fn rate_limit_middleware(
         .ok_or_else(|| AppError::Internal("SessionData missing from extensions".to_string()))?
         .clone();
 
-    check_rate_limit(&state, &session.workspace_id).await?;
+    check_rate_limit(&state, &session.workspace_id, &session.user_id).await?;
 
     Ok(next.run(req).await)
 }
 
-async fn check_rate_limit(state: &AppState, workspace_id: &str) -> Result<(), AppError> {
-    // Bucket key per whole second. Two-second TTL gives the current window
-    // and the previous one a chance to expire cleanly.
+async fn check_rate_limit(state: &AppState, workspace_id: &str, user_id: &str) -> Result<(), AppError> {
+    // Bucket key per user per whole second. Two-second TTL gives the current
+    // window and the previous one a chance to expire cleanly.
+    // Per-user (not per-workspace) so one user cannot starve others.
     let window = Utc::now().timestamp();
-    let key = format!("ratelimit:{workspace_id}:{window}");
+    let key = format!("ratelimit:{workspace_id}:{user_id}:{window}");
 
     let mut conn = state.redis_pool.get().await.map_err(AppError::RedisPool)?;
 
@@ -46,6 +47,7 @@ async fn check_rate_limit(state: &AppState, workspace_id: &str) -> Result<(), Ap
     if count > i64::from(state.config.rate_limit_rps) {
         warn!(
             workspace_id,
+            user_id,
             count,
             limit = state.config.rate_limit_rps,
             "rate limit exceeded"

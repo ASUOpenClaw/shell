@@ -27,7 +27,11 @@ pub async fn rate_limit_middleware(
     Ok(next.run(req).await)
 }
 
-async fn check_rate_limit(state: &AppState, workspace_id: &str, user_id: &str) -> Result<(), AppError> {
+async fn check_rate_limit(
+    state: &AppState,
+    workspace_id: &str,
+    user_id: &str,
+) -> Result<(), AppError> {
     // Bucket key per user per whole second. Two-second TTL gives the current
     // window and the previous one a chance to expire cleanly.
     // Per-user (not per-workspace) so one user cannot starve others.

@@ -1,9 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use crate::{
-    config::Config, error::AppError,
-    nats::publisher::NatsPublisher,
-};
+use crate::{config::Config, error::AppError, nats::publisher::NatsPublisher};
 
 pub struct AppState {
     pub config: Config,

@@ -209,10 +209,12 @@ async fn inject_mcp_context(
     // Reuse existing session token if present; mint new one otherwise.
     // Either way, reset the TTL so the token stays alive while the user is active.
     let session_key = format!("mcp_session:{workspace_id}:{user_id}");
-    let token: String = match conn.get::<_, Option<String>>(&session_key).await.map_err(AppError::RedisCmd)? {
-        Some(t) => t,
-        None => Uuid::new_v4().to_string(),
-    };
+    let existing_token: Option<String> = conn
+        .get::<_, Option<String>>(&session_key)
+        .await
+        .map_err(AppError::RedisCmd)?;
+    let is_new_session = existing_token.is_none();
+    let token = existing_token.unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let ctx_json = json!({
         "workspace_id": workspace_id,
@@ -221,12 +223,35 @@ async fn inject_mcp_context(
     .to_string();
 
     // Refresh both the session pointer and the ctx payload.
-    let _: () = conn.set_ex(&session_key, &token, 300_u64).await.map_err(AppError::RedisCmd)?;
-    let _: () = conn.set_ex(format!("mcp_ctx:{token}"), &ctx_json, 300_u64).await.map_err(AppError::RedisCmd)?;
+    let _: () = conn
+        .set_ex(&session_key, &token, 300_u64)
+        .await
+        .map_err(AppError::RedisCmd)?;
+    let _: () = conn
+        .set_ex(format!("mcp_ctx:{token}"), &ctx_json, 300_u64)
+        .await
+        .map_err(AppError::RedisCmd)?;
+
+    // Skills are injected only at session start — they live in conversation history
+    // from that point on. GoClaw maintains history server-side, so re-injecting on
+    // every message would duplicate skills in the context window every turn.
+    let skills_prefix = if is_new_session {
+        let skills: Option<String> = conn
+            .get(format!("ws_skills:{workspace_id}"))
+            .await
+            .ok()
+            .flatten();
+        match skills {
+            Some(s) if !s.is_empty() => format!("\n\n{s}"),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
 
     // Build the system message content.
     let ctx_msg = format!(
-        "[WORKSPACE_CTX: mcp_ctx={token}] Always pass this exact token as ctx_token in every tool call. Never modify it."
+        "[WORKSPACE_CTX: mcp_ctx={token}] Always pass this exact token as ctx_token in every tool call. Never modify it.{skills_prefix}"
     );
 
     // If the first message is a system message, append to its content.
@@ -296,9 +321,7 @@ fn build_upstream_headers(
     }
 
     // Inject workspace-bound GoClaw API key (tenant resolved automatically from key).
-    if let Ok(auth_value) =
-        reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}"))
-    {
+    if let Ok(auth_value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}")) {
         out.insert(reqwest::header::AUTHORIZATION, auth_value);
     }
 
@@ -320,10 +343,7 @@ fn build_upstream_headers(
 
     // Propagate (or set) request correlation ID for distributed tracing.
     if let Ok(v) = reqwest::header::HeaderValue::from_str(request_id) {
-        out.insert(
-            reqwest::header::HeaderName::from_static("x-request-id"),
-            v,
-        );
+        out.insert(reqwest::header::HeaderName::from_static("x-request-id"), v);
     }
 
     out

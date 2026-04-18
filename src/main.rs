@@ -12,6 +12,7 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() {
+    dotenvy::dotenv().ok(); // load .env if present, ignore if missing
     let cfg = config::Config::load().expect("failed to load config");
 
     // Init tracing before anything else so early errors are captured.

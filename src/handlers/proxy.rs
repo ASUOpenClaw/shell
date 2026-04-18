@@ -310,6 +310,7 @@ fn build_upstream_headers(
                 | &header::TRAILER
                 | &header::UPGRADE
                 | &header::AUTHORIZATION // replaced below
+                | &header::CONTENT_LENGTH // reqwest sets correct value from body
         ) {
             continue;
         }

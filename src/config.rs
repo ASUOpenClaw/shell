@@ -54,12 +54,18 @@ fn default_nats_subject_prefix() -> String {
 
 impl Config {
     pub fn load() -> Result<Self, config::ConfigError> {
-        config::Config::builder()
+        let mut cfg: Self = config::Config::builder()
             // No separator: SHELL_GOCLAW_GATEWAY_URL -> goclaw_gateway_url (flat).
             // Using "_" as separator would split the key on every underscore,
             // turning GOCLAW_GATEWAY_URL into nested goclaw.gateway.url.
             .add_source(config::Environment::with_prefix("SHELL"))
             .build()?
-            .try_deserialize()
+            .try_deserialize()?;
+        // dotenvy (and most shells) store PEM keys with literal \n rather than
+        // real newlines. Unescape so jsonwebtoken can parse the PEM correctly.
+        if cfg.jwt_public_key.contains("\\n") {
+            cfg.jwt_public_key = cfg.jwt_public_key.replace("\\n", "\n");
+        }
+        Ok(cfg)
     }
 }

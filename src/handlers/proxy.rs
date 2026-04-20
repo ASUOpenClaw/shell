@@ -97,10 +97,8 @@ pub async fn proxy_handler(
         .map_err(|e| AppError::Internal(format!("failed to read request body: {e}")))?;
 
     // -----------------------------------------------------------------------
-    // 4b. Inject MCP workspace context into the messages array.
-    //     Mint a short-lived token, store {workspace_id, user_id} in Redis,
-    //     and prepend (or append to existing) a system message so the model
-    //     can pass it as ctx_token in every MCP tool call.
+    // 4b. Inject MCP workspace context into the messages array and rewrite
+    //     the model field to "agent:{agent_key}" so GoClaw routes correctly.
     //     Redis failure → 503: better to fail fast than silently forward
     //     a request where MCP tool calls will all fail with "invalid token".
     // -----------------------------------------------------------------------
@@ -108,6 +106,7 @@ pub async fn proxy_handler(
         &state,
         &session.workspace_id,
         &session.user_id,
+        &creds.agent_key,
         raw_body_bytes,
     )
     .await?;
@@ -191,6 +190,7 @@ async fn inject_mcp_context(
     state: &AppState,
     workspace_id: &str,
     user_id: &str,
+    agent_key: &str,
     body: Bytes,
 ) -> Result<Bytes, AppError> {
     // Only modify JSON bodies that have a "messages" field.
@@ -198,6 +198,11 @@ async fn inject_mcp_context(
         Ok(v) => v,
         Err(_) => return Ok(body),
     };
+
+    // Override model to "agent:{agent_key}" so GoClaw routes to the correct agent.
+    if !agent_key.is_empty() {
+        parsed["model"] = Value::String(format!("agent:{agent_key}"));
+    }
 
     let messages = match parsed.get_mut("messages").and_then(|m| m.as_array_mut()) {
         Some(arr) => arr,
@@ -249,9 +254,12 @@ async fn inject_mcp_context(
         String::new()
     };
 
+    // Load workspace files and append to system message so the agent knows they exist.
+    let files_suffix = build_files_suffix(&mut conn, workspace_id).await;
+
     // Build the system message content.
     let ctx_msg = format!(
-        "[WORKSPACE_CTX: mcp_ctx={token}] Always pass this exact token as ctx_token in every tool call. Never modify it.{skills_prefix}"
+        "[WORKSPACE_CTX: mcp_ctx={token}] Always pass this exact token as ctx_token in every tool call. Never modify it.{skills_prefix}{files_suffix}"
     );
 
     // If the first message is a system message, append to its content.
@@ -414,6 +422,31 @@ fn publish_sse_events(publisher: &NatsPublisher, workspace_id: &str, user_id: &s
             body,
         ));
     }
+}
+
+/// Read workspace files from Redis `ws_files:{ws_id}` (hash: file_id → json)
+/// and return a formatted block for injection into the system message.
+/// Returns empty string when no files are registered.
+async fn build_files_suffix(conn: &mut deadpool_redis::Connection, workspace_id: &str) -> String {
+    let key = format!("ws_files:{workspace_id}");
+    let map: std::collections::HashMap<String, String> = match conn.hgetall(&key).await {
+        Ok(m) => m,
+        Err(_) => return String::new(),
+    };
+    if map.is_empty() {
+        return String::new();
+    }
+
+    let mut lines =
+        String::from("\n\nWorkspace files (use get_file / get_download_url / rag_search MCP tools):");
+    for (file_id, meta_json) in map.iter().take(20) {
+        let name = serde_json::from_str::<Value>(meta_json)
+            .ok()
+            .and_then(|v| v["name"].as_str().map(|s| s.to_owned()))
+            .unwrap_or_else(|| "?".to_string());
+        lines.push_str(&format!("\n- {name} (file_id: {file_id})"));
+    }
+    lines
 }
 
 fn bytes_to_json(bytes: &Bytes) -> Value {

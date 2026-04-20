@@ -58,8 +58,13 @@ impl NatsPublisher {
         match async_nats::connect(nats_url).await {
             Ok(client) => {
                 info!(url = nats_url, "connected to NATS");
+                let js = jetstream::new(client);
+                // Ensure the CONVERSATIONS stream exists — REST API normally creates it,
+                // but Shell may start before REST API (e.g. after VPN reconnect drops
+                // containers from the Docker bridge and REST API hasn't recovered yet).
+                ensure_conversations_stream(&js, subject_prefix).await;
                 Self {
-                    js: Some(jetstream::new(client)),
+                    js: Some(js),
                     subject_prefix: subject_prefix.to_string(),
                 }
             }
@@ -130,5 +135,21 @@ impl Default for NatsPublisher {
 impl NatsPublisher {
     pub fn is_connected(&self) -> bool {
         self.js.is_some()
+    }
+}
+
+/// Create the CONVERSATIONS JetStream stream if it does not already exist.
+/// Idempotent — `get_or_create_stream` returns the existing stream unchanged.
+async fn ensure_conversations_stream(js: &jetstream::Context, subject_prefix: &str) {
+    let subject = format!("{subject_prefix}.*");
+    let cfg = jetstream::stream::Config {
+        name: "CONVERSATIONS".to_string(),
+        subjects: vec![subject],
+        storage: jetstream::stream::StorageType::File,
+        ..Default::default()
+    };
+    match js.get_or_create_stream(cfg).await {
+        Ok(_) => info!("NATS stream ready: CONVERSATIONS"),
+        Err(e) => error!(error = %e, "failed to ensure CONVERSATIONS stream"),
     }
 }

@@ -14,6 +14,10 @@ pub struct WorkspaceCreds {
     pub agent_id: String,
     #[serde(default)]
     pub agent_key: String,
+    /// Permanent token (no TTL) for cron jobs and REST-triggered agent calls.
+    /// Written to Redis mcp_ctx:{token} with no expiry on workspace provisioning.
+    #[serde(default)]
+    pub mcp_service_token: String,
 }
 
 /// Load workspace credentials from Redis.

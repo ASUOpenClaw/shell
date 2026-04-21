@@ -107,6 +107,7 @@ pub async fn proxy_handler(
         &session.workspace_id,
         &session.user_id,
         &creds.agent_key,
+        &creds.mcp_service_token,
         raw_body_bytes,
     )
     .await?;
@@ -191,6 +192,7 @@ async fn inject_mcp_context(
     workspace_id: &str,
     user_id: &str,
     agent_key: &str,
+    mcp_service_token: &str,
     body: Bytes,
 ) -> Result<Bytes, AppError> {
     // Only modify JSON bodies that have a "messages" field.
@@ -258,8 +260,13 @@ async fn inject_mcp_context(
     let files_suffix = build_files_suffix(&mut conn, workspace_id).await;
 
     // Build the system message content.
+    let service_line = if !mcp_service_token.is_empty() {
+        format!("\n[SERVICE_CTX: mcp_service={mcp_service_token}] For scheduled/automated tasks (cron, background actions) pass this token as ctx_token instead.")
+    } else {
+        String::new()
+    };
     let ctx_msg = format!(
-        "[WORKSPACE_CTX: mcp_ctx={token}] Always pass this exact token as ctx_token in every tool call. Never modify it.{skills_prefix}{files_suffix}"
+        "[WORKSPACE_CTX: mcp_ctx={token}] Always pass this exact token as ctx_token in every tool call. Never modify it.{service_line}{skills_prefix}{files_suffix}"
     );
 
     // If the first message is a system message, append to its content.
@@ -426,7 +433,8 @@ fn publish_sse_events(publisher: &NatsPublisher, workspace_id: &str, user_id: &s
 
 /// Read workspace files from Redis `ws_files:{ws_id}` (hash: file_id → json)
 /// and return a formatted block for injection into the system message.
-/// Returns empty string when no files are registered.
+/// Files uploaded in the last 5 minutes are flagged as "just uploaded" with
+/// a stronger prompt so the agent proactively offers to search/analyze them.
 async fn build_files_suffix(conn: &mut deadpool_redis::Connection, workspace_id: &str) -> String {
     let key = format!("ws_files:{workspace_id}");
     let map: std::collections::HashMap<String, String> = match conn.hgetall(&key).await {
@@ -437,16 +445,44 @@ async fn build_files_suffix(conn: &mut deadpool_redis::Connection, workspace_id:
         return String::new();
     }
 
-    let mut lines =
-        String::from("\n\nWorkspace files (use get_file / get_download_url / rag_search MCP tools):");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    const RECENT_SECS: u64 = 300; // 5 minutes
+
+    let mut recent: Vec<(String, String)> = Vec::new();
+    let mut older: Vec<(String, String)> = Vec::new();
+
     for (file_id, meta_json) in map.iter().take(20) {
-        let name = serde_json::from_str::<Value>(meta_json)
-            .ok()
-            .and_then(|v| v["name"].as_str().map(|s| s.to_owned()))
-            .unwrap_or_else(|| "?".to_string());
-        lines.push_str(&format!("\n- {name} (file_id: {file_id})"));
+        let v = serde_json::from_str::<Value>(meta_json).unwrap_or(Value::Null);
+        let name = v["name"].as_str().unwrap_or("?").to_string();
+        let uploaded_at = v["uploaded_at"].as_u64().unwrap_or(0);
+        if uploaded_at > 0 && now.saturating_sub(uploaded_at) < RECENT_SECS {
+            recent.push((file_id.clone(), name));
+        } else {
+            older.push((file_id.clone(), name));
+        }
     }
-    lines
+
+    let mut out = String::new();
+
+    if !recent.is_empty() {
+        out.push_str("\n\n⚠ Files JUST UPLOADED — proactively acknowledge them and offer to search or analyze:");
+        for (file_id, name) in &recent {
+            out.push_str(&format!("\n- {name} (file_id: {file_id}) [NEW]"));
+        }
+        out.push_str("\nUse ws__rag_search to find content or ws__get_download_url to share the file.");
+    }
+
+    if !older.is_empty() {
+        out.push_str("\n\nOther workspace files (ws__get_file / ws__get_download_url / ws__rag_search):");
+        for (file_id, name) in &older {
+            out.push_str(&format!("\n- {name} (file_id: {file_id})"));
+        }
+    }
+
+    out
 }
 
 fn bytes_to_json(bytes: &Bytes) -> Value {

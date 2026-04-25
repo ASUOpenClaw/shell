@@ -6,16 +6,13 @@ use crate::error::AppError;
 /// Per-workspace GoClaw credentials cached in Redis by the REST API.
 ///
 /// Redis key: `ws_creds:{workspace_id}`
-/// Value: `{"api_key":"goclaw_sk_...","agent_id":"<uuid>","agent_key":"<slug>"}`
+/// Value: `{"api_key":"goclaw_sk_...","agent_id":"<uuid>","agent_key":"<slug>",...}`
 /// TTL: 3600 s (refreshed by REST API on workspace create/update)
 #[derive(Debug, Deserialize)]
 pub struct WorkspaceCreds {
     pub api_key: String,
     pub agent_id: String,
-    #[serde(default)]
-    pub agent_key: String,
     /// Permanent token (no TTL) for cron jobs and REST-triggered agent calls.
-    /// Written to Redis mcp_ctx:{token} with no expiry on workspace provisioning.
     #[serde(default)]
     pub mcp_service_token: String,
 }

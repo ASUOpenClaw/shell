@@ -10,8 +10,10 @@ use thiserror::Error;
 pub enum AppError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
-    #[error("gateway error: {0}")]
-    GatewayError(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+    #[error("rpc error: {0}")]
+    RpcError(String),
     #[error("rate limit exceeded")]
     RateLimitExceeded,
     #[error("redis pool error: {0}")]
@@ -26,11 +28,12 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::RateLimitExceeded => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate limit exceeded".to_string(),
             ),
-            AppError::GatewayError(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
+            AppError::RpcError(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
         };
         (status, Json(json!({ "error": message }))).into_response()

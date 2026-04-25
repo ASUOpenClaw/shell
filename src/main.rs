@@ -1,6 +1,7 @@
 mod agents;
 mod config;
 mod error;
+mod goclaw;
 mod handlers;
 mod middleware;
 mod nats;

@@ -30,3 +30,5 @@ jsonwebtoken = "9"
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 dotenvy = "0.15"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+tokio-stream = "0.1"

@@ -18,6 +18,9 @@ pub struct ConversationMessage {
     pub message_id: String,
     pub workspace_id: String,
     pub user_id: String,
+    /// GoClaw session key — used by the REST subscriber to link this message
+    /// to the correct Conversation row (or create one if it doesn't exist yet).
+    pub session_key: String,
     pub direction: MessageDirection,
     /// Parsed JSON body when possible; falls back to a `{ "raw": "..." }` wrapper.
     pub body: serde_json::Value,
@@ -28,6 +31,7 @@ impl ConversationMessage {
     pub fn new(
         workspace_id: impl Into<String>,
         user_id: impl Into<String>,
+        session_key: impl Into<String>,
         direction: MessageDirection,
         body: serde_json::Value,
     ) -> Self {
@@ -35,6 +39,7 @@ impl ConversationMessage {
             message_id: Uuid::new_v4().to_string(),
             workspace_id: workspace_id.into(),
             user_id: user_id.into(),
+            session_key: session_key.into(),
             direction,
             body,
             timestamp: Utc::now(),

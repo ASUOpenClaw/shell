@@ -1,12 +1,15 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use crate::{config::Config, error::AppError, nats::publisher::NatsPublisher};
+use crate::{
+    config::Config, error::AppError, goclaw::rpc_pool::GoclawRpcPool,
+    nats::publisher::NatsPublisher,
+};
 
 pub struct AppState {
     pub config: Config,
     pub redis_pool: deadpool_redis::Pool,
-    pub http_client: reqwest::Client,
     pub nats_publisher: NatsPublisher,
+    pub rpc_pool: Arc<GoclawRpcPool>,
 }
 
 impl AppState {
@@ -21,19 +24,20 @@ impl AppState {
                 .map_err(|e| AppError::Internal(format!("redis pool init: {e}")))?
         };
 
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(config.request_timeout_ms))
-            .build()
-            .map_err(|e| AppError::Internal(format!("http client init: {e}")))?;
-
         let nats_publisher =
             NatsPublisher::connect(&config.nats_url, &config.nats_subject_prefix).await;
+
+        let rpc_pool = GoclawRpcPool::new(
+            &config.goclaw_gateway_url,
+            config.goclaw_gateway_token.clone(),
+            redis_pool.clone(),
+        );
 
         Ok(Arc::new(Self {
             config,
             redis_pool,
-            http_client,
             nats_publisher,
+            rpc_pool,
         }))
     }
 }

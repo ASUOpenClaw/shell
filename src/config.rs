@@ -25,6 +25,15 @@ pub struct Config {
     pub nats_url: String,
     #[serde(default = "default_nats_subject_prefix")]
     pub nats_subject_prefix: String,
+    /// Master GoClaw gateway token — used for tenant-level admin WS connections.
+    /// Env var: SHELL_GOCLAW_GATEWAY_TOKEN
+    #[serde(default)]
+    pub goclaw_gateway_token: String,
+    /// Shared secret for REST → Shell service-to-service calls.
+    /// Clients pass it as `X-Shell-Service-Key` header.
+    /// Env var: SHELL_SERVICE_KEY
+    #[serde(default)]
+    pub service_key: String,
     /// Serve Swagger UI at /swagger-ui. Disable in production.
     #[serde(default)]
     pub swagger_enabled: bool,

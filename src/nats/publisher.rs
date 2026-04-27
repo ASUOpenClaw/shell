@@ -1,6 +1,8 @@
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -47,65 +49,82 @@ impl ConversationMessage {
     }
 }
 
-pub struct NatsPublisher {
-    /// None when NATS is unavailable at startup — publish becomes a no-op.
+/// Shared inner state — behind an Arc<RwLock<>> so the reconnect task can swap
+/// in a live JetStream context without restarting the server.
+struct NatsInner {
     js: Option<jetstream::Context>,
     subject_prefix: String,
+}
+
+#[derive(Clone)]
+pub struct NatsPublisher {
+    inner: Arc<RwLock<NatsInner>>,
 }
 
 impl NatsPublisher {
     /// Attempt to connect to NATS JetStream.
     ///
-    /// Returns a fully connected publisher on success.
-    /// On failure, logs an error and returns a no-op publisher so the proxy
-    /// can still start and serve traffic without NATS.
+    /// Always returns immediately — on failure the publisher starts as a no-op
+    /// and a background task retries every 5 s until the connection succeeds.
     pub async fn connect(nats_url: &str, subject_prefix: &str) -> Self {
-        match async_nats::connect(nats_url).await {
-            Ok(client) => {
-                info!(url = nats_url, "connected to NATS");
-                let js = jetstream::new(client);
-                // Ensure the CONVERSATIONS stream exists — REST API normally creates it,
-                // but Shell may start before REST API (e.g. after VPN reconnect drops
-                // containers from the Docker bridge and REST API hasn't recovered yet).
-                ensure_conversations_stream(&js, subject_prefix).await;
-                Self {
-                    js: Some(js),
-                    subject_prefix: subject_prefix.to_string(),
+        let inner = Arc::new(RwLock::new(NatsInner {
+            js: None,
+            subject_prefix: subject_prefix.to_string(),
+        }));
+
+        let publisher = Self { inner: inner.clone() };
+
+        // Try initial connection, then spawn background reconnect loop.
+        let url = nats_url.to_string();
+        let prefix = subject_prefix.to_string();
+        tokio::spawn(async move {
+            loop {
+                match async_nats::connect(&url).await {
+                    Ok(client) => {
+                        info!(url = %url, "connected to NATS");
+                        let js = jetstream::new(client);
+                        ensure_conversations_stream(&js, &prefix).await;
+                        inner.write().await.js = Some(js);
+                        return; // connected — exit the retry loop
+                    }
+                    Err(e) => {
+                        error!(url = %url, error = %e, "NATS connect failed, retrying in 5s");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    }
                 }
             }
-            Err(e) => {
-                error!(url = nats_url, error = %e, "failed to connect to NATS — publishing disabled");
-                Self {
-                    js: None,
-                    subject_prefix: subject_prefix.to_string(),
-                }
-            }
-        }
+        });
+
+        publisher
     }
 
-    /// Placeholder constructor used before Step 9 wired up in AppState::build.
-    /// Kept for tests and local runs without NATS.
+    /// Placeholder constructor for tests / local runs without NATS.
     pub fn new() -> Self {
         Self {
-            js: None,
-            subject_prefix: "conversation".to_string(),
+            inner: Arc::new(RwLock::new(NatsInner {
+                js: None,
+                subject_prefix: "conversation".to_string(),
+            })),
         }
     }
 
     /// Fire-and-forget publish. Spawns a task so the caller is never blocked.
     /// Logs errors but never returns them.
     pub fn publish(&self, msg: ConversationMessage) {
-        let js = match &self.js {
-            Some(js) => js.clone(),
-            None => {
-                warn!(workspace_id = %msg.workspace_id, "NATS unavailable, skipping publish");
-                return;
-            }
-        };
-
-        let subject = format!("{}.{}", self.subject_prefix, msg.workspace_id);
+        let inner = self.inner.clone();
 
         tokio::spawn(async move {
+            let (js, subject) = {
+                let guard = inner.read().await;
+                match &guard.js {
+                    Some(js) => (js.clone(), format!("{}.{}", guard.subject_prefix, msg.workspace_id)),
+                    None => {
+                        warn!(workspace_id = %msg.workspace_id, "NATS unavailable, skipping publish");
+                        return;
+                    }
+                }
+            };
+
             let bytes = match serde_json::to_vec(&msg) {
                 Ok(b) => b,
                 Err(e) => {
@@ -116,9 +135,6 @@ impl NatsPublisher {
 
             match js.publish(subject.clone(), bytes.into()).await {
                 Ok(ack) => {
-                    // Await the server ack in the background.
-                    // If the stream has no consumers yet the ack still confirms
-                    // the message was persisted by the JetStream server.
                     if let Err(e) = ack.await {
                         error!(subject, error = %e, "NATS publish ack failed");
                     }
@@ -129,17 +145,16 @@ impl NatsPublisher {
             }
         });
     }
+
+    pub fn is_connected(&self) -> bool {
+        // Non-blocking best-effort check — returns false if lock is contended.
+        self.inner.try_read().map(|g| g.js.is_some()).unwrap_or(false)
+    }
 }
 
 impl Default for NatsPublisher {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl NatsPublisher {
-    pub fn is_connected(&self) -> bool {
-        self.js.is_some()
     }
 }
 

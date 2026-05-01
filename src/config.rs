@@ -34,6 +34,11 @@ pub struct Config {
     /// Env var: SHELL_SERVICE_KEY
     #[serde(default)]
     pub service_key: String,
+    /// REST API base URL used to refresh ws_creds from Postgres on cache miss.
+    /// Example: http://api:8000. Leave empty to disable fallback (hard 401 on miss).
+    /// Env var: SHELL_REST_API_URL
+    #[serde(default)]
+    pub rest_api_url: String,
     /// Serve Swagger UI at /swagger-ui. Disable in production.
     #[serde(default)]
     pub swagger_enabled: bool,

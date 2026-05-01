@@ -10,6 +10,7 @@ pub struct AppState {
     pub redis_pool: deadpool_redis::Pool,
     pub nats_publisher: NatsPublisher,
     pub rpc_pool: Arc<GoclawRpcPool>,
+    pub http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -27,10 +28,15 @@ impl AppState {
         let nats_publisher =
             NatsPublisher::connect(&config.nats_url, &config.nats_subject_prefix).await;
 
+        let http_client = reqwest::Client::new();
+
         let rpc_pool = GoclawRpcPool::new(
             &config.goclaw_gateway_url,
             config.goclaw_gateway_token.clone(),
             redis_pool.clone(),
+            config.rest_api_url.clone(),
+            config.service_key.clone(),
+            http_client.clone(),
         );
 
         Ok(Arc::new(Self {
@@ -38,6 +44,7 @@ impl AppState {
             redis_pool,
             nats_publisher,
             rpc_pool,
+            http_client,
         }))
     }
 }

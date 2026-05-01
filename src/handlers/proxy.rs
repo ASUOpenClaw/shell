@@ -44,7 +44,14 @@ pub async fn proxy_handler(
     // -----------------------------------------------------------------------
     // 1. Load per-workspace GoClaw credentials from Redis.
     // -----------------------------------------------------------------------
-    let creds = load_workspace_creds(&state.redis_pool, &session.workspace_id).await?;
+    let creds = load_workspace_creds(
+        &state.redis_pool,
+        &session.workspace_id,
+        &state.config.rest_api_url,
+        &state.config.service_key,
+        &state.http_client,
+    )
+    .await?;
 
     let request_id = Uuid::new_v4().to_string();
     info!(

@@ -11,6 +11,8 @@ services:
             SHELL_GOCLAW_GATEWAY_URL: "http://goclaw:18790"
             SHELL_REDIS_URL: "redis://rest-redis-1:6379"
             SHELL_NATS_URL: "nats://rest-nats-1:4222"
+            SHELL_REST_API_URL: "http://rest-api-1:8000"
+            SHELL_REQUEST_TIMEOUT_MS: "300000"
         networks:
             - openclaw-net
 

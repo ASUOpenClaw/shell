@@ -72,7 +72,9 @@ impl NatsPublisher {
             subject_prefix: subject_prefix.to_string(),
         }));
 
-        let publisher = Self { inner: inner.clone() };
+        let publisher = Self {
+            inner: inner.clone(),
+        };
 
         // Try initial connection, then spawn background reconnect loop.
         let url = nats_url.to_string();
@@ -117,7 +119,10 @@ impl NatsPublisher {
             let (js, subject) = {
                 let guard = inner.read().await;
                 match &guard.js {
-                    Some(js) => (js.clone(), format!("{}.{}", guard.subject_prefix, msg.workspace_id)),
+                    Some(js) => (
+                        js.clone(),
+                        format!("{}.{}", guard.subject_prefix, msg.workspace_id),
+                    ),
                     None => {
                         warn!(workspace_id = %msg.workspace_id, "NATS unavailable, skipping publish");
                         return;
@@ -148,7 +153,10 @@ impl NatsPublisher {
 
     pub fn is_connected(&self) -> bool {
         // Non-blocking best-effort check — returns false if lock is contended.
-        self.inner.try_read().map(|g| g.js.is_some()).unwrap_or(false)
+        self.inner
+            .try_read()
+            .map(|g| g.js.is_some())
+            .unwrap_or(false)
     }
 }
 

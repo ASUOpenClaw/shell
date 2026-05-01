@@ -75,6 +75,9 @@ pub struct GoclawRpcPool {
     gateway_ws_url: String,
     gateway_token: String,
     redis_pool: deadpool_redis::Pool,
+    rest_api_url: String,
+    service_key: String,
+    http_client: reqwest::Client,
 }
 
 impl GoclawRpcPool {
@@ -82,6 +85,9 @@ impl GoclawRpcPool {
         gateway_url: &str,
         gateway_token: String,
         redis_pool: deadpool_redis::Pool,
+        rest_api_url: String,
+        service_key: String,
+        http_client: reqwest::Client,
     ) -> Arc<Self> {
         let pool = Arc::new(Self {
             workspace_entries: Arc::new(Mutex::new(HashMap::new())),
@@ -89,6 +95,9 @@ impl GoclawRpcPool {
             gateway_ws_url: to_ws_url(gateway_url),
             gateway_token,
             redis_pool,
+            rest_api_url,
+            service_key,
+            http_client,
         });
 
         let pool_clone = Arc::clone(&pool);
@@ -146,7 +155,14 @@ impl GoclawRpcPool {
             }
         }
 
-        let creds = load_workspace_creds(&self.redis_pool, ws_id).await?;
+        let creds = load_workspace_creds(
+            &self.redis_pool,
+            ws_id,
+            &self.rest_api_url,
+            &self.service_key,
+            &self.http_client,
+        )
+        .await?;
         info!(ws_id = %ws_id, "opening new RPC WS connection for workspace");
         let conn = self.connect(&creds.api_key, "system").await?;
         entries.insert(

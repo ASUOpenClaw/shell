@@ -9,10 +9,12 @@ use axum::{
 };
 use deadpool_redis::redis::AsyncCommands;
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{error, info};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
@@ -24,16 +26,48 @@ use crate::{
     state::AppState,
 };
 
+/// Single message in the conversation.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ChatMessage {
+    /// Role of the message author: `system`, `user`, `assistant`, or `tool`.
+    pub role: String,
+    /// Text content of the message.
+    pub content: String,
+}
+
+/// OpenAI-compatible chat completions request forwarded to the workspace GoClaw agent.
+///
+/// The `model` field is **ignored** — Shell always overrides it with
+/// `agent:{agent_key}` to route to the workspace-bound agent.
+/// The response includes an `X-Session-Key` header with the active session key.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ChatCompletionRequest {
+    /// Conversation history in OpenAI message format.
+    pub messages: Vec<ChatMessage>,
+    /// Model name — ignored, Shell routes to the workspace agent regardless.
+    pub model: Option<String>,
+    /// Stream the response as SSE (`data: {...}` lines ending with `data: [DONE]`).
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub stream: bool,
+    /// GoClaw session key that scopes conversation continuity.
+    /// Defaults to `"user-{user_id}"` when omitted.
+    /// Custom keys let the same user maintain multiple independent threads.
+    pub session_key: Option<String>,
+}
+
 #[utoipa::path(
     post,
-    path = "/v1/{path}",
+    path = "/v1/chat/completions",
     tag = "proxy",
-    params(("path" = String, Path, description = "Path forwarded to the GoClaw gateway")),
+    security(("BearerAuth" = [])),
+    request_body = ChatCompletionRequest,
     responses(
-        (status = 200, description = "Streamed response from GoClaw gateway"),
-        (status = 401, description = "Unauthorized"),
+        (status = 200, description = "Agent response — SSE stream when `stream=true`, buffered JSON otherwise. \
+                       Response header `X-Session-Key` contains the active GoClaw session key."),
+        (status = 401, description = "Missing or invalid JWT / X-Workspace-Id header"),
         (status = 429, description = "Rate limit exceeded"),
-        (status = 502, description = "Gateway error"),
+        (status = 502, description = "GoClaw gateway error"),
     )
 )]
 pub async fn proxy_handler(

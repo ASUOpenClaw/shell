@@ -14,6 +14,16 @@ use crate::{error::AppError, middleware::auth::SessionData, state::AppState};
 // User-facing — GET /v1/sessions
 // Returns only the calling user's own sessions (keys prefixed "user-{user_id}").
 // ---------------------------------------------------------------------------
+#[utoipa::path(
+    get,
+    path = "/v1/sessions",
+    tag = "sessions",
+    security(("BearerAuth" = [])),
+    responses(
+        (status = 200, description = "Sessions owned by the calling user (keys prefixed `user-{user_id}`)"),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
 pub async fn list_user_sessions(
     State(state): State<Arc<AppState>>,
     Extension(session): Extension<SessionData>,
@@ -43,6 +53,18 @@ pub async fn list_user_sessions(
 // User-facing — DELETE /v1/sessions/{key}
 // Only the session owner (key starts with "user-{user_id}") may delete.
 // ---------------------------------------------------------------------------
+#[utoipa::path(
+    delete,
+    path = "/v1/sessions/{key}",
+    tag = "sessions",
+    security(("BearerAuth" = [])),
+    params(("key" = String, Path, description = "Session key — must be owned by the calling user")),
+    responses(
+        (status = 204, description = "Session deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Session belongs to a different user"),
+    )
+)]
 pub async fn delete_session(
     State(state): State<Arc<AppState>>,
     Extension(session): Extension<SessionData>,
@@ -64,6 +86,18 @@ pub async fn delete_session(
 // User-facing — POST /v1/sessions/{key}/reset
 // Only the session owner may reset.
 // ---------------------------------------------------------------------------
+#[utoipa::path(
+    post,
+    path = "/v1/sessions/{key}/reset",
+    tag = "sessions",
+    security(("BearerAuth" = [])),
+    params(("key" = String, Path, description = "Session key — must be owned by the calling user")),
+    responses(
+        (status = 200, description = "Session reset — history cleared, next message starts fresh"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Session belongs to a different user"),
+    )
+)]
 pub async fn reset_session(
     State(state): State<Arc<AppState>>,
     Extension(session): Extension<SessionData>,
@@ -85,6 +119,17 @@ pub async fn reset_session(
 // Service-facing — GET /api/workspaces/{ws_id}/sessions
 // Returns ALL sessions in the workspace (admin view). Auth: X-Shell-Service-Key.
 // ---------------------------------------------------------------------------
+#[utoipa::path(
+    get,
+    path = "/api/workspaces/{ws_id}/sessions",
+    tag = "sessions",
+    security(("ServiceKey" = [])),
+    params(("ws_id" = String, Path, description = "Workspace ID")),
+    responses(
+        (status = 200, description = "All active sessions in the workspace"),
+        (status = 401, description = "Missing or invalid X-Shell-Service-Key"),
+    )
+)]
 pub async fn list_all_sessions(
     State(state): State<Arc<AppState>>,
     Path(ws_id): Path<String>,

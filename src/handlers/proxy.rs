@@ -194,7 +194,7 @@ pub async fn proxy_handler(
     // -----------------------------------------------------------------------
     let ws_url = to_ws_url(&state.config.goclaw_gateway_url);
 
-    let (event_tx, event_rx) = mpsc::unbounded_channel::<GoclawEvent>();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<GoclawEvent>();
 
     let params_owned = OwnedChatParams {
         ws_url: ws_url.clone(),
@@ -227,7 +227,37 @@ pub async fn proxy_handler(
     let session_key_header = goclaw_session_key.clone();
 
     if is_streaming {
-        let stream = UnboundedReceiverStream::new(event_rx).flat_map(|event| {
+        // Tee the event stream: SSE to client + accumulate for NATS publish.
+        let (sse_tx, sse_rx) = mpsc::unbounded_channel::<GoclawEvent>();
+
+        {
+            let nats_pub = state.nats_publisher.clone();
+            let ws_id = session.workspace_id.clone();
+            let uid = session.user_id.clone();
+            let sk = goclaw_session_key.clone();
+            tokio::spawn(async move {
+                let mut accumulated = String::new();
+                while let Some(event) = event_rx.recv().await {
+                    if let GoclawEvent::Chunk(ref text) = event {
+                        accumulated.push_str(text);
+                    }
+                    // Forward to SSE; ignore error — client may have disconnected.
+                    let _ = sse_tx.send(event);
+                }
+                // Stream ended — publish full assembled response to NATS.
+                if !accumulated.is_empty() {
+                    nats_pub.publish(ConversationMessage::new(
+                        ws_id,
+                        uid,
+                        sk,
+                        MessageDirection::Response,
+                        json!({"role": "assistant", "content": accumulated}),
+                    ));
+                }
+            });
+        }
+
+        let stream = UnboundedReceiverStream::new(sse_rx).flat_map(|event| {
             let bytes: Vec<Result<axum::body::Bytes, std::convert::Infallible>> = match event {
                 GoclawEvent::Chunk(text) => {
                     let data = json!({

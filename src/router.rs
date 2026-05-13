@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use axum::http::StatusCode;
 use axum::{
     Router, middleware,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use tower_http::{
     timeout::TimeoutLayer,
@@ -15,7 +15,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     handlers::{
-        agents::{create_agent, delete_agent, list_agents, update_agent},
+        agents::{create_agent, delete_agent, list_agents, set_agent_file, update_agent},
         cron::{create_cron, delete_cron, list_cron, run_cron, toggle_cron, update_cron},
         health::{health_handler, list_agents_handler},
         proxy::proxy_handler,
@@ -79,6 +79,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/workspaces/{ws_id}/agents/{agent_id}",
             patch(update_agent).delete(delete_agent),
+        )
+        .route(
+            "/workspaces/{ws_id}/agents/{agent_id}/files/{file_name}",
+            put(set_agent_file),
         )
         // Tenants
         .route("/tenants", get(list_tenants).post(create_tenant))

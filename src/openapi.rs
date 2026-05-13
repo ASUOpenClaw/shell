@@ -2,7 +2,7 @@ use utoipa::OpenApi;
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme};
 
 use crate::handlers::{
-    agents::{CreateAgentRequest, UpdateAgentRequest},
+    agents::{CreateAgentRequest, SetAgentFileRequest, UpdateAgentRequest},
     cron::{CreateCronJobRequest, ToggleCronJobRequest, UpdateCronJobRequest},
     health::HealthResponse,
     proxy::{ChatCompletionRequest, ChatMessage},
@@ -61,6 +61,7 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::agents::create_agent,
         crate::handlers::agents::update_agent,
         crate::handlers::agents::delete_agent,
+        crate::handlers::agents::set_agent_file,
         // Tenants — service-facing
         crate::handlers::tenants::list_tenants,
         crate::handlers::tenants::create_tenant,
@@ -77,6 +78,7 @@ impl utoipa::Modify for SecurityAddon {
         UpdateCronJobRequest,
         ToggleCronJobRequest,
         CreateAgentRequest,
+        SetAgentFileRequest,
         UpdateAgentRequest,
         CreateTenantRequest,
         UpdateTenantRequest,

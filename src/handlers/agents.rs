@@ -12,6 +12,13 @@ use utoipa::ToSchema;
 
 use crate::{error::AppError, state::AppState};
 
+/// Body for setting an agent-level context file.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct SetAgentFileRequest {
+    /// Full file content (UTF-8 text, typically Markdown).
+    pub content: String,
+}
+
 /// Create a new GoClaw agent in the workspace.
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct CreateAgentRequest {
@@ -118,6 +125,47 @@ pub async fn update_agent(
     let payload = state
         .rpc_pool
         .call_workspace(&ws_id, "agents.update", body)
+        .await?;
+    Ok(Json(payload))
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/workspaces/{ws_id}/agents/{agent_id}/files/{file_name}
+// Body: { "content": "..." }
+// Sets an agent-level context file via the agents.files.set WS RPC.
+// ---------------------------------------------------------------------------
+#[utoipa::path(
+    put,
+    path = "/api/workspaces/{ws_id}/agents/{agent_id}/files/{file_name}",
+    tag = "agents",
+    security(("ServiceKey" = [])),
+    params(
+        ("ws_id" = String, Path, description = "Workspace ID"),
+        ("agent_id" = String, Path, description = "Agent ID (slug)"),
+        ("file_name" = String, Path, description = "Context file name (e.g. INSTRUCTIONS.md)"),
+    ),
+    request_body = SetAgentFileRequest,
+    responses(
+        (status = 200, description = "File set"),
+        (status = 401, description = "Missing or invalid X-Shell-Service-Key"),
+    )
+)]
+pub async fn set_agent_file(
+    State(state): State<Arc<AppState>>,
+    Path((ws_id, agent_id, file_name)): Path<(String, String, String)>,
+    Json(body): Json<SetAgentFileRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let payload = state
+        .rpc_pool
+        .call_workspace(
+            &ws_id,
+            "agents.files.set",
+            json!({
+                "agentId": agent_id,
+                "name": file_name,
+                "content": body.content,
+            }),
+        )
         .await?;
     Ok(Json(payload))
 }

@@ -9,6 +9,20 @@ use tracing::{error, info, warn};
 pub enum GoclawEvent {
     /// A streamed text token from the agent.
     Chunk(String),
+    /// Extended thinking / reasoning token.
+    Thinking(String),
+    /// Tool was invoked by the agent.
+    ToolCall {
+        call_id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// Tool returned a result.
+    ToolResult {
+        call_id: String,
+        name: String,
+        content: String,
+    },
     /// The agent run completed successfully.
     Done,
     /// The agent run failed.
@@ -186,39 +200,72 @@ pub async fn goclaw_chat(
                     }
 
                     Some("event") => {
-                        // GoClaw uses the "agent" event type for all run lifecycle events.
-                        // Content arrives as: payload.type="chunk", inner content at payload.payload.content
-                        // Run end: payload.type="run.completed" (or run.failed/run.cancelled)
-                        if v["event"].as_str() != Some("agent") {
-                            // Ignore health, tick, presence, etc.
-                            continue;
-                        }
-                        let payload = &v["payload"];
+                        match v["event"].as_str() {
+                            Some("agent") => {
+                                let payload = &v["payload"];
+                                let inner = &payload["payload"];
 
-                        match payload["type"].as_str() {
-                            Some("chunk") => {
-                                // Streaming token: payload.payload.content
-                                if let Some(text) = payload["payload"]["content"].as_str() {
-                                    if !text.is_empty() {
-                                        let _ = tx.send(GoclawEvent::Chunk(text.to_owned()));
+                                match payload["type"].as_str() {
+                                    Some("chunk") => {
+                                        if let Some(text) = inner["content"].as_str() {
+                                            if !text.is_empty() {
+                                                let _ = tx.send(GoclawEvent::Chunk(text.to_owned()));
+                                            }
+                                        }
+                                    }
+                                    Some("thinking") => {
+                                        let text = inner["content"]
+                                            .as_str()
+                                            .or_else(|| inner["text"].as_str())
+                                            .unwrap_or("");
+                                        if !text.is_empty() {
+                                            let _ = tx.send(GoclawEvent::Thinking(text.to_owned()));
+                                        }
+                                    }
+                                    Some("tool.call") => {
+                                        let call_id = inner["id"].as_str().unwrap_or("").to_owned();
+                                        let name = inner["name"].as_str().unwrap_or("unknown").to_owned();
+                                        let input = inner["input"].clone();
+                                        let _ = tx.send(GoclawEvent::ToolCall { call_id, name, input });
+                                    }
+                                    Some("tool.result") => {
+                                        let call_id = inner["tool_call_id"].as_str().unwrap_or("").to_owned();
+                                        let name = inner["name"].as_str().unwrap_or("unknown").to_owned();
+                                        let content = match &inner["content"] {
+                                            serde_json::Value::String(s) => s.clone(),
+                                            other => other.to_string(),
+                                        };
+                                        let _ = tx.send(GoclawEvent::ToolResult { call_id, name, content });
+                                    }
+                                    Some("run.completed") => {
+                                        let _ = tx.send(GoclawEvent::Done);
+                                        return Ok(());
+                                    }
+                                    Some("run.failed") | Some("run.cancelled") => {
+                                        let err = inner["error"]
+                                            .as_str()
+                                            .or_else(|| inner["message"].as_str())
+                                            .or_else(|| payload["error"].as_str())
+                                            .unwrap_or("agent run failed")
+                                            .to_owned();
+                                        let _ = tx.send(GoclawEvent::Error(err));
+                                        return Ok(());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Some("chat") => {
+                                let payload = &v["payload"];
+                                // thinking arrives here in direct chat event format
+                                if payload["type"].as_str() == Some("thinking") {
+                                    if let Some(text) = payload["text"].as_str() {
+                                        if !text.is_empty() {
+                                            let _ = tx.send(GoclawEvent::Thinking(text.to_owned()));
+                                        }
                                     }
                                 }
                             }
-                            Some("run.completed") => {
-                                let _ = tx.send(GoclawEvent::Done);
-                                return Ok(());
-                            }
-                            Some("run.failed") | Some("run.cancelled") => {
-                                let err = payload["payload"]["error"]
-                                    .as_str()
-                                    .or_else(|| payload["payload"]["message"].as_str())
-                                    .or_else(|| payload["error"].as_str())
-                                    .unwrap_or("agent run failed")
-                                    .to_owned();
-                                let _ = tx.send(GoclawEvent::Error(err));
-                                return Ok(());
-                            }
-                            _ => {}
+                            _ => {} // health, tick, presence, etc.
                         }
                     }
 

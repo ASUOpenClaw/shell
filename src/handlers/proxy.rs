@@ -151,7 +151,10 @@ pub async fn proxy_handler(
         .await
         .map_err(AppError::RedisCmd)?;
 
-    // Build workspace context to inject at session start.
+    // Build workspace context to inject.
+    // ctx_token is already in CAPABILITIES.md (GoClaw injects it every turn), so we
+    // only inject here when there is something dynamic: workspace skills (new sessions
+    // only) or recently-uploaded files (every turn if any are new).
     let inject_content: Option<String> = if is_new_session {
         let skills: Option<String> = conn
             .get(format!("ws_skills:{}", session.workspace_id))
@@ -163,18 +166,17 @@ pub async fn proxy_handler(
             _ => String::new(),
         };
         let files_block = build_files_suffix(&mut conn, &session.workspace_id).await;
-
-        Some(format!(
-            "[WORKSPACE_CTX: ctx_token={mcp_token}]\n\
-             Use this token as the ctx_token argument for every ws__ tool call.\
-             {skills_block}{files_block}",
-            mcp_token = creds.mcp_service_token,
-        ))
+        let combined = format!("{skills_block}{files_block}");
+        if combined.trim().is_empty() {
+            None
+        } else {
+            Some(combined.trim_start_matches('\n').to_string())
+        }
     } else {
         // On existing sessions, inject only if files were just uploaded.
         let files_block = build_files_suffix(&mut conn, &session.workspace_id).await;
         if files_block.contains("[NEW]") {
-            Some(files_block)
+            Some(files_block.trim_start_matches('\n').to_string())
         } else {
             None
         }
@@ -232,27 +234,64 @@ pub async fn proxy_handler(
 
         {
             let nats_pub = state.nats_publisher.clone();
+            let rpc_pool = Arc::clone(&state.rpc_pool);
             let ws_id = session.workspace_id.clone();
             let uid = session.user_id.clone();
             let sk = goclaw_session_key.clone();
             tokio::spawn(async move {
-                let mut accumulated = String::new();
+                let mut text_buf = String::new();
+                let mut turn_events: Vec<serde_json::Value> = Vec::new();
+
                 while let Some(event) = event_rx.recv().await {
-                    if let GoclawEvent::Chunk(ref text) = event {
-                        accumulated.push_str(text);
+                    match &event {
+                        GoclawEvent::Chunk(text) => {
+                            text_buf.push_str(text);
+                            turn_events.push(json!({"type": "chunk", "text": text}));
+                        }
+                        GoclawEvent::Thinking(text) => {
+                            turn_events.push(json!({"type": "thinking", "text": text}));
+                        }
+                        GoclawEvent::ToolCall { call_id, name, input } => {
+                            turn_events.push(json!({
+                                "type": "tool_call",
+                                "call_id": call_id,
+                                "name": name,
+                                "input": input,
+                            }));
+                        }
+                        GoclawEvent::ToolResult { call_id, name, content } => {
+                            turn_events.push(json!({
+                                "type": "tool_result",
+                                "call_id": call_id,
+                                "name": name,
+                                "content": content,
+                            }));
+                        }
+                        _ => {}
                     }
                     // Forward to SSE; ignore error — client may have disconnected.
                     let _ = sse_tx.send(event);
                 }
-                // Stream ended — publish full assembled response to NATS.
-                if !accumulated.is_empty() {
-                    nats_pub.publish(ConversationMessage::new(
+
+                // Fetch full history from GoClaw for sync check.
+                let goclaw_history = rpc_pool
+                    .call_workspace(&ws_id, "chat.history", json!({"sessionKey": sk}))
+                    .await
+                    .ok();
+
+                if !text_buf.is_empty() || !turn_events.is_empty() {
+                    let mut msg = ConversationMessage::new(
                         ws_id,
                         uid,
                         sk,
                         MessageDirection::Response,
-                        json!({"role": "assistant", "content": accumulated}),
-                    ));
+                        json!({"role": "assistant", "content": text_buf}),
+                    )
+                    .with_events(turn_events);
+                    if let Some(history) = goclaw_history {
+                        msg = msg.with_goclaw_history(history);
+                    }
+                    nats_pub.publish(msg);
                 }
             });
         }
@@ -263,6 +302,18 @@ pub async fn proxy_handler(
                     let data = json!({
                         "choices": [{"delta": {"content": text}, "finish_reason": null, "index": 0}]
                     });
+                    vec![Ok(axum::body::Bytes::from(format!("data: {data}\n\n")))]
+                }
+                GoclawEvent::Thinking(text) => {
+                    let data = json!({"type": "thinking", "thinking": text});
+                    vec![Ok(axum::body::Bytes::from(format!("data: {data}\n\n")))]
+                }
+                GoclawEvent::ToolCall { call_id, name, input } => {
+                    let data = json!({"type": "tool_call", "call_id": call_id, "name": name, "input": input});
+                    vec![Ok(axum::body::Bytes::from(format!("data: {data}\n\n")))]
+                }
+                GoclawEvent::ToolResult { call_id, name, content } => {
+                    let data = json!({"type": "tool_result", "call_id": call_id, "name": name, "content": content});
                     vec![Ok(axum::body::Bytes::from(format!("data: {data}\n\n")))]
                 }
                 GoclawEvent::Done => {
@@ -295,11 +346,34 @@ pub async fn proxy_handler(
         // Non-streaming: collect all chunks then return JSON.
         let mut content = String::new();
         let mut finish_reason = "stop".to_owned();
+        let mut turn_events: Vec<serde_json::Value> = Vec::new();
         let mut rx = event_rx;
 
         while let Some(event) = rx.recv().await {
             match event {
-                GoclawEvent::Chunk(text) => content.push_str(&text),
+                GoclawEvent::Chunk(text) => {
+                    content.push_str(&text);
+                    turn_events.push(json!({"type": "chunk", "text": text}));
+                }
+                GoclawEvent::Thinking(text) => {
+                    turn_events.push(json!({"type": "thinking", "text": text}));
+                }
+                GoclawEvent::ToolCall { call_id, name, input } => {
+                    turn_events.push(json!({
+                        "type": "tool_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "input": input,
+                    }));
+                }
+                GoclawEvent::ToolResult { call_id, name, content: result } => {
+                    turn_events.push(json!({
+                        "type": "tool_result",
+                        "call_id": call_id,
+                        "name": name,
+                        "content": result,
+                    }));
+                }
                 GoclawEvent::Done => break,
                 GoclawEvent::Error(err) => {
                     error!(error = %err, "GoClaw error during non-streaming collection");
@@ -312,14 +386,26 @@ pub async fn proxy_handler(
             }
         }
 
+        // Fetch full history from GoClaw for sync check.
+        let goclaw_history = state
+            .rpc_pool
+            .call_workspace(&session.workspace_id, "chat.history", json!({"sessionKey": session_key_header}))
+            .await
+            .ok();
+
         // Publish response to NATS.
-        state.nats_publisher.publish(ConversationMessage::new(
+        let mut msg = ConversationMessage::new(
             &session.workspace_id,
             &session.user_id,
             &session_key_header,
             MessageDirection::Response,
             json!({"role": "assistant", "content": content}),
-        ));
+        )
+        .with_events(turn_events);
+        if let Some(history) = goclaw_history {
+            msg = msg.with_goclaw_history(history);
+        }
+        state.nats_publisher.publish(msg);
 
         let response_body = json!({
             "id": format!("chatcmpl-{}", Uuid::new_v4()),
@@ -393,18 +479,18 @@ async fn build_files_suffix(conn: &mut deadpool_redis::Connection, workspace_id:
     let mut out = String::new();
 
     if !recent.is_empty() {
-        out.push_str("\n\n⚠ Files JUST UPLOADED — proactively acknowledge them and offer to search or analyze:");
+        out.push_str("\n\n⚠ Файлы ТОЛЬКО ЧТО ЗАГРУЖЕНЫ — сразу сообщи об этом пользователю и предложи найти или проанализировать содержимое:");
         for (file_id, name) in &recent {
             out.push_str(&format!("\n- {name} (file_id: {file_id}) [NEW]"));
         }
         out.push_str(
-            "\nUse ws__rag_search to find content or ws__get_download_url to share the file.",
+            "\nИспользуй ws__rag_search для поиска по содержимому или ws__get_download_url для скачивания.",
         );
     }
 
     if !older.is_empty() {
         out.push_str(
-            "\n\nOther workspace files (ws__get_file / ws__get_download_url / ws__rag_search):",
+            "\n\nДругие файлы рабочего пространства (ws__get_file / ws__get_download_url / ws__rag_search):",
         );
         for (file_id, name) in &older {
             out.push_str(&format!("\n- {name} (file_id: {file_id})"));

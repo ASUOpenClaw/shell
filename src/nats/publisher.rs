@@ -27,6 +27,14 @@ pub struct ConversationMessage {
     /// Parsed JSON body when possible; falls back to a `{ "raw": "..." }` wrapper.
     pub body: serde_json::Value,
     pub timestamp: DateTime<Utc>,
+    /// Structured turn events (tool_call, tool_result, thinking, chunk).
+    /// Present on direction=response only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<serde_json::Value>,
+    /// Full chat.history from GoClaw fetched after run.completed.
+    /// Used by the subscriber to sync local message count against GoClaw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goclaw_history: Option<serde_json::Value>,
 }
 
 impl ConversationMessage {
@@ -45,7 +53,19 @@ impl ConversationMessage {
             direction,
             body,
             timestamp: Utc::now(),
+            events: Vec::new(),
+            goclaw_history: None,
         }
+    }
+
+    pub fn with_events(mut self, events: Vec<serde_json::Value>) -> Self {
+        self.events = events;
+        self
+    }
+
+    pub fn with_goclaw_history(mut self, history: serde_json::Value) -> Self {
+        self.goclaw_history = Some(history);
+        self
     }
 }
 

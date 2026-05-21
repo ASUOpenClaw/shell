@@ -114,7 +114,11 @@ pub async fn goclaw_chat(
         info!(
             session_key = %params.session_key,
             inject_len = content.len(),
-            inject_preview = %&content[..content.len().min(300)],
+            inject_preview = %{
+                let mut end = content.len().min(300);
+                while !content.is_char_boundary(end) { end -= 1; }
+                &content[..end]
+            },
             "injecting workspace context"
         );
         let inject_frame = json!({

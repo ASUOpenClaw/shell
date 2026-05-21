@@ -124,8 +124,9 @@ pub async fn proxy_handler(
     let custom_session_key = parsed["session_key"].as_str().map(str::to_owned);
 
     // -----------------------------------------------------------------------
-    // 3. Session tracking — inject workspace context on first turn.
-    //    TTL: 4 h (14400 s), sliding window reset on every request.
+    // 3. Inject recently-uploaded workspace files into every request.
+    //    Skills are managed as GoClaw agent context files (SKILL_*.md) and
+    //    injected by GoClaw automatically — no per-session injection needed.
     // -----------------------------------------------------------------------
     let mut conn = state.redis_pool.get().await.map_err(AppError::RedisPool)?;
 
@@ -134,46 +135,9 @@ pub async fn proxy_handler(
         .clone()
         .unwrap_or_else(|| format!("user-{}", session.user_id));
 
-    // Track new-session state per session key (not just per user) so custom
-    // sessions also get context injected on their first message.
-    let session_key_redis = format!(
-        "mcp_session:{}:{}",
-        session.workspace_id, goclaw_session_key
-    );
-    let existing: Option<String> = conn
-        .get::<_, Option<String>>(&session_key_redis)
-        .await
-        .map_err(AppError::RedisCmd)?;
-    let is_new_session = existing.is_none();
-
-    let _: () = conn
-        .set_ex(&session_key_redis, "1", 14400_u64)
-        .await
-        .map_err(AppError::RedisCmd)?;
-
-    // Build workspace context to inject.
-    // ctx_token is already in CAPABILITIES.md (GoClaw injects it every turn), so we
-    // only inject here when there is something dynamic: workspace skills (new sessions
-    // only) or recently-uploaded files (every turn if any are new).
-    let inject_content: Option<String> = if is_new_session {
-        let skills: Option<String> = conn
-            .get(format!("ws_skills:{}", session.workspace_id))
-            .await
-            .ok()
-            .flatten();
-        let skills_block = match skills {
-            Some(s) if !s.is_empty() => format!("\n\n{s}"),
-            _ => String::new(),
-        };
-        let files_block = build_files_suffix(&mut conn, &session.workspace_id).await;
-        let combined = format!("{skills_block}{files_block}");
-        if combined.trim().is_empty() {
-            None
-        } else {
-            Some(combined.trim_start_matches('\n').to_string())
-        }
-    } else {
-        // On existing sessions, inject only if files were just uploaded.
+    // Inject the files block only when there are recently-uploaded files ([NEW]).
+    // ctx_token and skills live in GoClaw context files and need no injection here.
+    let inject_content: Option<String> = {
         let files_block = build_files_suffix(&mut conn, &session.workspace_id).await;
         if files_block.contains("[NEW]") {
             Some(files_block.trim_start_matches('\n').to_string())
@@ -463,7 +427,6 @@ async fn build_files_suffix(conn: &mut deadpool_redis::Connection, workspace_id:
     const RECENT_SECS: u64 = 300;
 
     let mut recent: Vec<(String, String)> = Vec::new();
-    let mut older: Vec<(String, String)> = Vec::new();
 
     for (file_id, meta_json) in map.iter().take(20) {
         let v = serde_json::from_str::<Value>(meta_json).unwrap_or(Value::Null);
@@ -471,31 +434,18 @@ async fn build_files_suffix(conn: &mut deadpool_redis::Connection, workspace_id:
         let uploaded_at = v["uploaded_at"].as_u64().unwrap_or(0);
         if uploaded_at > 0 && now.saturating_sub(uploaded_at) < RECENT_SECS {
             recent.push((file_id.clone(), name));
-        } else {
-            older.push((file_id.clone(), name));
         }
+    }
+
+    if recent.is_empty() {
+        return String::new();
     }
 
     let mut out = String::new();
-
-    if !recent.is_empty() {
-        out.push_str("\n\n⚠ Файлы ТОЛЬКО ЧТО ЗАГРУЖЕНЫ — сразу сообщи об этом пользователю и предложи найти или проанализировать содержимое:");
-        for (file_id, name) in &recent {
-            out.push_str(&format!("\n- {name} (file_id: {file_id}) [NEW]"));
-        }
-        out.push_str(
-            "\nИспользуй ws__rag_search для поиска по содержимому или ws__get_download_url для скачивания.",
-        );
+    out.push_str("\n\n⚠ Файлы ТОЛЬКО ЧТО ЗАГРУЖЕНЫ — сразу сообщи об этом пользователю и предложи найти или проанализировать содержимое:");
+    for (file_id, name) in &recent {
+        out.push_str(&format!("\n- {name} (file_id: {file_id}) [NEW]"));
     }
-
-    if !older.is_empty() {
-        out.push_str(
-            "\n\nДругие файлы рабочего пространства (ws__get_file / ws__get_download_url / ws__rag_search):",
-        );
-        for (file_id, name) in &older {
-            out.push_str(&format!("\n- {name} (file_id: {file_id})"));
-        }
-    }
-
+    out.push_str("\nИспользуй ws__rag_search для поиска по содержимому или ws__get_file для получения метаданных.");
     out
 }

@@ -1,11 +1,12 @@
 use std::{sync::Arc, time::Duration};
 
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::{
     Router, middleware,
     routing::{delete, get, patch, post, put},
 };
 use tower_http::{
+    cors::CorsLayer,
     timeout::TimeoutLayer,
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
 };
@@ -97,6 +98,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             service_auth_middleware,
         ));
 
+    let cors = build_cors_layer(&state.config.cors_origins);
+
     let api: Router = Router::new()
         .route("/health", get(health_handler))
         .route("/admin/agents", get(list_agents_handler))
@@ -121,4 +124,25 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             StatusCode::GATEWAY_TIMEOUT,
             timeout,
         ))
+        .layer(cors)
+}
+
+fn build_cors_layer(cors_origins: &str) -> CorsLayer {
+    let origins: Vec<HeaderValue> = cors_origins
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<HeaderValue>().ok())
+        .collect();
+
+    let layer = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers(tower_http::cors::Any)
+        .expose_headers(tower_http::cors::Any);
+
+    if origins.is_empty() {
+        layer.allow_origin(tower_http::cors::Any)
+    } else {
+        layer.allow_origin(origins)
+    }
 }

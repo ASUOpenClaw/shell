@@ -42,6 +42,11 @@ pub struct Config {
     /// Serve Swagger UI at /swagger-ui. Disable in production.
     #[serde(default)]
     pub swagger_enabled: bool,
+    /// Comma-separated allowed CORS origins, e.g. "https://app.example.com,http://localhost:3000".
+    /// Leave empty to allow all origins (permissive default for dev).
+    /// Env var: SHELL_CORS_ORIGINS
+    #[serde(default)]
+    pub cors_origins: String,
 }
 
 fn default_host() -> String {

@@ -1,0 +1,5 @@
+services:
+    shell:
+        ports: !reset []
+        environment:
+            SHELL_CORS_ORIGINS: https://asuclaw.rmnw-panel.ru
